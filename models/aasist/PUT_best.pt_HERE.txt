@@ -1,0 +1,6 @@
+Copy the Band-Augmented AASIST checkpoint here and name it exactly:
+
+    best.pt
+
+Expected top-level keys: model_state, epoch, config_hash, best_val_eer.
+A bare state_dict also loads.

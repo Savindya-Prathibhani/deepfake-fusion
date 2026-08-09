@@ -1,0 +1,8 @@
+Copy the H1-Enhanced BAM checkpoint here and name it exactly:
+
+    best.pth
+
+Expected top-level keys: model_state_dict, epoch, metric_name, metric_value.
+Sanity check: seg_head.1.weight must be 2 x 259 (= 2 x (256 + 3 H1 boundary
+features)). A 2 x 256 tensor means you have the BASELINE checkpoint, not H1,
+and load_state_dict will fail with a size mismatch.

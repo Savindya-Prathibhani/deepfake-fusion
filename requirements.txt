@@ -1,0 +1,15 @@
+# Core
+torch>=2.1
+numpy>=1.24
+PyYAML>=6.0
+
+# Component 2 front end (WavLM + its feature extractor)
+transformers>=4.35
+
+# Audio decode / resample
+soundfile>=0.12
+librosa>=0.10
+imageio-ffmpeg>=0.4.9      # bundles an ffmpeg binary for video audio extraction
+
+# UI
+streamlit>=1.32          # 1.32+ is enough; no version-specific chart kwargs are used

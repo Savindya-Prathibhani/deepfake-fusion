@@ -1,0 +1,122 @@
+# H1 — Boundary-Gated Segment Head
+#
+# SINGLE-VARIABLE CHANGE vs bam_baseline_corrected_labels:
+#   model.boundary_gated_seg_head: false -> true
+# Everything else is byte-for-byte identical, including seed. Any difference
+# in results is attributable to this one thing.
+#
+#
+# WHAT XAI FOUND (metrics/xai_eval.json, metrics/error_taxonomy_eval.json)
+# ========================================================================
+# STEP A — the BE module already knows where the boundaries are:
+#
+#   median boundary probability at TRUE segment edges
+#     CLEAN_HIT     onset 0.6877   offset 0.7480    (80.9% > 0.5)
+#     TOO_LONG      onset 0.7317   offset 0.7620    (79.4% > 0.5)
+#     FRAGMENTED    onset 0.7213   offset 0.7923    (83.3% > 0.5)
+#   baseline, interior of spoof spans : 0.0000
+#   baseline, far from any spoof span : 0.0000
+#
+# The boundary signal on failing segments is as strong as on succeeding
+# ones, and the baseline is essentially zero — so the BE module is both
+# sensitive and specific. The segment head over-extends anyway.
+#
+# STEP B — hand-crafted acoustic features do NOT explain the error:
+# every Cohen's d comparing spill frames against true-spoof and against
+# clean-bonafide frames came in below 0.28, i.e. a null result. It
+# independently reproduces the Phase A null finding from Component 1. So
+# this intervention deliberately adds NO hand-crafted feature.
+#
+# THE STRUCTURAL CAUSE
+# ====================
+# boundary_probs reach the rest of the network through exactly one path:
+#     boundary_probs -> (> 0.5) -> cumsum -> segment IDs -> BFA attn mask
+# The segment head never sees them, and the hard threshold discards their
+# magnitude. So the head has no way to act on a boundary the model has
+# already found. This config routes that existing internal signal into the
+# frame decision — three derived features, no new parameters beyond the
+# widened seg_head input (hidden_dim -> hidden_dim + 3).
+#
+# The head is misaligned with the boundary channel in BOTH directions,
+# which is why one change targets two failure modes:
+#   TOO_LONG    (19.7% of reachable segments) crosses a boundary scored 0.76
+#   FRAGMENTED  (10.8%) splits a run where the boundary is scored 0.0000
+#
+#
+# PREDICTIONS (falsifiable — record these BEFORE looking at results)
+# =================================================================
+# Measured on the reachable subset (true segments >= 0.08s, where IoU >= 0.5
+# is physically attainable given ~20ms frames), baseline values:
+#     CLEAN_HIT  68.9%   TOO_LONG 19.7%   FRAGMENTED 10.8%   MISSED 0.4%
+#
+#   1. TOO_LONG decreases and CLEAN_HIT increases.
+#   2. FRAGMENTED decreases.
+#   3. Frame-level FP falls substantially. Spill frames are 162,365 of the
+#      198,117 frame FPs (82%), so this is where the headroom is.
+#   4. Frame-level FN does NOT rise (baseline 55,001). This is the load-
+#      bearing prediction: it follows from the 0.0000 interior baseline —
+#      the BE module does not fire spuriously inside spoof spans, so gating
+#      on it should not chop true spoof runs. If FN rises materially, the
+#      hypothesis is wrong.
+#
+# FAILURE CONDITIONS — any of these means H1 did not work:
+#   - TOO_LONG falls but MISSED or TOO_SHORT rises (a trade, not a fix)
+#   - FRAGMENTED rises
+#   - frame FN rises materially
+#
+# A null result here is still a result: "the head does not use the boundary
+# signal even when handed it directly" would say the fault is deeper than
+# signal routing.
+
+experiment:
+  name: bam_h1_boundary_gated_seghead
+  description: >
+    H1: route the BE module's existing boundary probabilities directly into
+    the segment head (continuous probability, frames-since-last-peak, local
+    max in a +/-5 frame window). Single-variable change from
+    bam_baseline_corrected_labels. Motivated by the eval-split XAI finding
+    that boundary detection is accurate (0.762 median at true offsets vs
+    0.0000 baseline) while the segment head over-extends past those edges,
+    and by the null result for hand-crafted acoustic features.
+
+seed: 42
+
+data:
+  hf_repo: SavindyaPrathibhani123/partialspoof-raw-3
+  splits: [train, dev, eval]
+  seg_resolution: "0.02"
+  alignment_mode: direct_0.02
+  crop_strategy: spoof_anchored_4sec_train_full_length_eval
+
+model:
+  ssl_model: microsoft/wavlm-base-plus
+  hidden_dim: 256
+  n_heads: 4
+  n_bfa_layers: 2
+  freeze_cnn: true
+  boundary_gated_seg_head: true      # <-- THE single variable
+  boundary_peak_threshold: 0.5
+  boundary_window: 5
+
+optim:
+  lr: 0.0001
+  weight_decay: 0.0001
+  batch_size: 8
+
+loss:
+  w_utt: 0.4
+  w_seg: 0.4
+  w_bdy: 0.2
+
+train:
+  epochs: 5
+
+checkpoint:
+  criterion: frame_eer
+  keep_last: false
+
+eval:
+  batch_size: 1
+
+status:
+  kind: trained_by_pipeline

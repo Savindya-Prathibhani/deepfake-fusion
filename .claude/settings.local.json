@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pip install -q pytest)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -q)"
+    ]
+  }
+}

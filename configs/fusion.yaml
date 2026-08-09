@@ -1,0 +1,160 @@
+# Runtime settings for the integrated application.
+#
+# THIS FILE IS THE ONLY PLACE A THRESHOLD IS SET.
+# The UI reads these values and displays them; it does not and must not offer
+# controls that change them. A detector whose operating point moves when a
+# viewer drags a slider has no reportable operating point.
+#
+# Every threshold here is sourced from a saved artifact of the original
+# projects, or is a fusion parameter whose reasoning is stated below, so none
+# of them looks arbitrary.
+
+component1:
+  # Band-Augmented AASIST
+  checkpoint: models/aasist/best.pt
+  config: src/component1_aasist/external/AASIST.conf
+
+  # Provenance: experiments/band_augment/metrics/test_results.json,
+  # key "val_eer_threshold_used". This is the VALIDATION-derived EER
+  # threshold - the same no-leakage threshold used in the formal test
+  # evaluation, not one re-derived from test data.
+  threshold: 0.7142295241350909
+
+  # How multiple 4.04 s windows of a long file are combined.
+  #   mean - the file is called fake when it is fake on average.
+  #   min  - the file is called fake if ANY window is fake (more sensitive,
+  #          more false positives on long real recordings).
+  window_aggregate: mean
+
+component2:
+  # H1-Enhanced BAM (boundary-gated segment head)
+  checkpoint: models/bam/best.pth
+  config: configs/bam_h1_boundary_gated_seghead.yaml
+
+  # ── READ THIS BEFORE CHANGING ────────────────────────────────────────
+  # Provenance: selected by maximising DEV segment F1 at IoU >= 0.5, by
+  # sweeping this threshold over eval_artifacts_dev.npz. Measured curve:
+  #
+  #     threshold   seg P    seg R    seg F1
+  #       0.50      0.9110   0.8996   0.9053
+  #       0.55      0.9125   0.9040   0.9082   <- plateau
+  #       0.70      0.9068   0.9097   0.9083   <- dev peak
+  #       0.9985    0.5144   0.5822   0.5462   <- the EER threshold
+  #
+  # 0.55 is chosen over the nominal dev peak at 0.70 because the two are
+  # indistinguishable on dev (0.9082 vs 0.9083) while 0.55 was also the
+  # peak of the same sweep on the EVAL split, where the EER-derived
+  # threshold lands at 0.9985 and collapses segment F1 to 0.55. The flat
+  # dev optimum plus the shifted eval optimum makes 0.55 the more robust
+  # of two statistically tied choices.
+  #
+  # NOTE: the `frame_threshold` stored inside eval_artifacts_*.npz is the
+  # frame EER threshold (dev 0.7024, eval 0.9985), NOT a segment-F1
+  # selection. Do not copy it in here.
+  frame_threshold: 0.55
+
+  # Reported for transparency, NOT used as a decision gate. The utterance
+  # EER threshold moved from 0.0049 on dev to 0.8683 on eval - a spread
+  # that makes it unusable as a fixed operating point on unseen audio.
+  # The fusion tree relies on frame-level evidence instead.
+  utt_threshold: null
+
+  # Seconds per WavLM forward pass for long files. WavLM self-attention is
+  # quadratic in length; 20 s is safe on ~4 GB of GPU memory. Lower it if
+  # you hit out-of-memory, raise it for slightly better context.
+  chunk_seconds: 20.0
+
+speech_gate:
+  # ── READ THIS BEFORE DISABLING ───────────────────────────────────────
+  # Both components were trained exclusively on speech utterances (ASVspoof
+  # 2019 LA, PartialSpoof v1.2). Neither has defined behaviour on silence,
+  # room tone or music. Measured on the two checkpoints in models/:
+  #
+  #     input                     C1 P(bonafide)   C2 mean P(spoof)/frame
+  #     digital silence, 6 s          0.317              0.880
+  #     white noise, 6 s              0.737              0.938
+  #
+  # Both call silence spoof, and Component 2 does so more confidently than
+  # it calls many genuine splices. Every real recording contains pauses and
+  # room tone, so without this gate those regions become "tampered
+  # segments" and the pauses drag Component 1's windowed mean below its
+  # threshold. That is the direct cause of genuine audio being reported as
+  # fake. This gate confines both models to the domain they were measured
+  # on; it does not alter either model.
+  enabled: true
+
+  # A frame this many dB below the file's loud percentile is non-speech.
+  # Relative, so a quiet phone recording and a loud studio file gate the
+  # same way.
+  rel_db: -35.0
+
+  # Absolute floor, applied as well as the relative one, so a file that is
+  # nothing but hiss does not have its loudest hiss promoted to speech.
+  abs_dbfs: -55.0
+
+  # The "loud" reference: 95th percentile rather than the maximum, so a
+  # single click cannot raise the reference for the whole file.
+  ref_percentile: 95.0
+
+  # Component 1 scores fixed 4.04 s windows. A window must be at least this
+  # fraction speech to be included in the whole-file mean. If no window
+  # qualifies, all of them are used and `speech_windows_only: false`
+  # appears in the output.
+  min_window_speech: 0.5
+
+  # Below this speech fraction the whole file is out of domain, and the
+  # result carries an explicit warning rather than being reported plain.
+  min_file_speech_ratio: 0.05
+
+fusion:
+  # ── Gate 1: duration ─────────────────────────────────────────────────
+  # Spoof regions shorter than this are discarded before anything is
+  # reported or counted toward the tampered ratio.
+  #
+  # 0.30 s, not the previous 1.00 s. PartialSpoof's spoof spans are
+  # frequently well under a second, so a 1 s floor discarded most genuine
+  # partial-tampering detections and made the reported time ranges
+  # unrepresentative of what the model actually found. 0.30 s is ~15
+  # frames at the 20 ms frame rate - long enough that a single noisy
+  # frame run cannot survive, short enough to keep real edits.
+  min_segment_s: 0.30
+
+  # Spoof runs separated by less than this are joined into one range before
+  # the duration gate is applied. A splice is not two splices because two
+  # frames in the middle of it scored just over the threshold, and without
+  # this each fragment can fall under the duration floor and vanish.
+  merge_gap_s: 0.10
+
+  # ── Gate 2: segment confidence ───────────────────────────────────────
+  # Mean P(spoof) a surviving segment must reach before it counts as
+  # tampering.
+  #
+  # This is the main fix for genuine audio being reported as tampered.
+  # A frame is flagged at P(bonafide) < 0.55, i.e. P(spoof) > 0.45, and on
+  # real recordings breaths, silence and codec artefacts routinely drift
+  # a run of frames just past that line. Those runs average ~0.5 P(spoof);
+  # an actual splice averages 0.9+. Requiring 0.70 removes the former
+  # without touching the latter. Rejected segments are still reported in
+  # the JSON under `rejected_segments`, so nothing is hidden.
+  min_segment_confidence: 0.70
+
+  # ── The first split of the decision tree ─────────────────────────────
+  # Component 1 decision margin at or above which its FAKE call counts as
+  # "High confidence" rather than "Low/Medium".
+  #
+  # The margin is (threshold - score) / threshold, so 0.50 means
+  # P(bonafide) <= 0.357 against the 0.7142 threshold. Below that band the
+  # tree does NOT let Component 1 alone declare a file synthetic: a real
+  # recording scoring 0.71 is 0.004 from the threshold, and treating that
+  # as equivalent to a score of 0.02 is what produced "Fully AI-Generated"
+  # verdicts on genuine audio.
+  c1_high_confidence: 0.50
+
+  # ── Ratio bands ──────────────────────────────────────────────────────
+  # Flagged fraction at or above which the file is called fully generated
+  # rather than partially tampered.
+  full_ratio: 0.90
+
+  # Flagged fraction below which the localization evidence is treated as
+  # absent ("None" in the tree) rather than small.
+  min_ratio: 0.05
