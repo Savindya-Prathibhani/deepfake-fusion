@@ -177,7 +177,7 @@ def fuse(c1: dict, c2: dict, params: dict | None = None) -> dict:
     p = dict(DEFAULTS)
     p.update({k: v for k, v in (params or {}).items() if k in DEFAULTS})
 
-    c1_fake = bool(c1["is_fake"])
+    c1_fake = _c1_is_fake(c1)
     c1_conf = float(c1["confidence"])
     duration_s = _duration(c2)
 
@@ -268,6 +268,13 @@ def _duration(c2: dict) -> float:
     if ratio > 0:
         return float(c2.get("tampered_duration_s", 0.0)) / ratio
     return 0.0
+
+
+def _c1_is_fake(c1: dict) -> bool:
+    """Derive Component 1's decision from its score at the integration edge."""
+    score = float(c1["score_bonafide"])
+    threshold = float(c1["threshold"])
+    return score < threshold
 
 
 def _qualifying_segments(c2: dict, min_confidence: float
