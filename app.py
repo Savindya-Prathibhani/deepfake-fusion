@@ -1,7 +1,15 @@
 """
-app.py — Streamlit UI for the integrated audio deepfake detector.
+app.py — Streamlit UI for the audio deepfake detector.
 
 Run:  streamlit run app.py
+
+The interface deliberately presents one detector, not two components and a
+fusion engine. A viewer is being asked "is this recording genuine?", and the
+architecture that answers it is not part of that question: naming the models,
+showing which rule fired, or reporting each model's separate score invites the
+reader to second-guess the verdict with numbers they have no way to weigh.
+Everything needed to audit a result is still produced — it goes into the
+downloadable JSON record, which carries the full component-level evidence.
 """
 
 from __future__ import annotations
@@ -18,7 +26,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from fusion.decision_tree import format_range, format_ranges   # noqa: E402
-from pipeline import DeepfakePipeline, load_settings           # noqa: E402
+from pipeline import DeepfakePipeline   # noqa: E402
 
 st.set_page_config(page_title="Audio Deepfake Detector", layout="wide")
 
@@ -28,8 +36,21 @@ VERDICT_STYLE = {
     "Partially Tampered": ("#b54708", "▲"),
 }
 
+# What the viewer is told, per verdict. Written from the listener's point of
+# view rather than the engine's: no rule numbers, no model names, no bands.
+VERDICT_TEXT = {
+    "Real": "No synthetic or edited speech was detected in this recording.",
+    "Fully AI-Generated":
+        "This recording appears to be synthetic speech throughout, rather than "
+        "a genuine recording with edits inserted into it.",
+    "Partially Tampered":
+        "This recording is largely genuine, but one or more passages appear to "
+        "be synthetic. The affected time ranges are listed below.",
+}
 
-@st.cache_resource(show_spinner="Loading both models (first run downloads WavLM)…")
+
+@st.cache_resource(show_spinner="Loading the detector (first run downloads its "
+                                "speech model)…")
 def get_pipeline():
     return DeepfakePipeline()
 
@@ -37,24 +58,21 @@ def get_pipeline():
 def main():
     st.title("Audio Deepfake Detection")
     st.caption(
-        "Component 1 — Band-Augmented AASIST (whole-file) · "
-        "Component 2 — H1-Enhanced BAM (frame-level localization) · "
-        "rule-based Fusion Engine"
+        "Detects fully AI-generated speech and audio that is genuine except "
+        "for inserted manipulated passages, which it locates in time."
     )
 
-    settings = load_settings()
-
     with st.sidebar:
-        render_thresholds(settings)
+        render_about()
 
     uploaded = st.file_uploader(
         "Upload audio or video",
-        type=["wav", "flac", "mp3", "m4a", "ogg", "opus", "aac",
+        type=["wav", "flac", "mp3", "m4a", "ogg", "opus", "aac", "wma",
               "mp4", "mkv", "mov", "avi", "webm"],
     )
     if uploaded is None:
         st.info("Upload a file to begin. Video files have their audio track "
-                "extracted automatically at 16 kHz mono.")
+                "extracted automatically.")
         return
 
     suffix = Path(uploaded.name).suffix
@@ -74,48 +92,36 @@ def main():
     render(result)
 
 
-def render_thresholds(settings: dict):
-    """Show the operating point. Read-only, deliberately.
+def render_about():
+    """What the tool does and what it cannot do. No thresholds.
 
-    Every one of these values is set in `configs/fusion.yaml` and nowhere
-    else. They were selected against held-out data, and a threshold a viewer
-    can drag is not an operating point — two people would get two verdicts on
-    the same file and neither could be cited. Change them in the config, where
-    the change is versioned and its provenance is written down.
+    The operating point is fixed in `configs/fusion.yaml`; it is neither shown
+    nor adjustable here. A detector whose thresholds a viewer can read off and
+    argue with is inviting exactly the second-guessing that a stated verdict
+    exists to settle, and one they can drag has no reportable operating point
+    at all.
     """
-    c1, c2, f = settings["component1"], settings["component2"], settings["fusion"]
-    g = settings.get("speech_gate", {})
-
-    st.header("Operating point")
-    st.caption("Set in `configs/fusion.yaml` — backend only, not adjustable here.")
-
+    st.header("About")
     st.markdown(
-        f"""
-| Threshold | Value |
-|---|---|
-| C1 decision (P(bonafide)) | `{c1['threshold']:.4f}` |
-| C1 high-confidence margin | `{f['c1_high_confidence']:.2f}` |
-| C2 frame decision | `{c2['frame_threshold']:.2f}` |
-| Minimum segment | `{f['min_segment_s']:.2f}` s |
-| Merge ranges closer than | `{f.get('merge_gap_s', 0.10):.2f}` s |
-| Minimum segment confidence | `{f['min_segment_confidence']:.2f}` |
-| Ratio: "none" below | `{f['min_ratio']:.2f}` |
-| Ratio: "high" at or above | `{f['full_ratio']:.2f}` |
-| Speech gate | `{"on" if g.get("enabled", True) else "off"}` |
-"""
+        "Upload a recording and the detector returns one of three verdicts:\n\n"
+        "- **Real** — no synthetic speech found\n"
+        "- **Partially Tampered** — genuine, with manipulated passages spliced "
+        "in; their time ranges are reported\n"
+        "- **Fully AI-Generated** — synthetic throughout\n"
     )
+    st.divider()
     st.caption(
-        "C1 threshold: band_augment validation EER threshold. "
-        "C2 frame threshold: dev segment-F1 sweep at IoU ≥ 0.5. "
-        "The speech gate restricts both components to speech frames; both were "
-        "trained only on speech and both score silence as confidently fake."
+        "Analysis covers the speech in a recording; music, silence and room "
+        "tone are not evidence either way and are excluded.\n\n"
+        "Confidence is a decision margin, not a calibrated probability. "
+        "Results on phone recordings, social-media audio and heavily "
+        "compressed uploads have not been validated — treat those as "
+        "indicative."
     )
 
 
 def render(result: dict):
     fusion = result["fusion"]
-    c1 = result["component1_band_augmented_aasist"]
-    c2 = result["component2_h1_enhanced_bam"]
     label = fusion["final_prediction"]
     colour, mark = VERDICT_STYLE[label]
 
@@ -125,151 +131,118 @@ def render(result: dict):
         f"<div style='font-size:1.7rem;font-weight:650;color:{colour};'>"
         f"{mark}&nbsp;{label}</div>"
         f"<div style='opacity:.75;margin-top:.35rem;'>"
-        f"{fusion['rule_description']}</div>"
-        f"<div style='opacity:.55;margin-top:.5rem;font-size:.85rem;'>"
-        f"{fusion['rule_fired']} · Component 1 confidence band: "
-        f"{fusion['c1_confidence_band']} · Component 2 segment ratio: "
-        f"{fusion['segment_ratio_band']}</div></div>",
+        f"{VERDICT_TEXT[label]}</div></div>",
         unsafe_allow_html=True,
     )
 
-    st.write("")
-    a, b, c, d = st.columns(4)
-    a.metric("Overall confidence", f"{fusion['confidence']*100:.1f}%")
-    b.metric("Whole-audio confidence (C1)", f"{c1['confidence']*100:.1f}%",
-             help=f"P(bonafide) = {c1['score_bonafide']:.4f} vs threshold "
-                  f"{c1['threshold']:.4f} → {c1['verdict']}")
     ev = fusion["evidence"]
-    c.metric("Tampered ratio", f"{ev['tampered_ratio']*100:.1f}%",
-             help="Fraction of the analysed SPEECH covered by segments that "
-                  "cleared both the duration and the confidence gate. Silence "
-                  "is excluded from the denominator, so the number does not "
-                  "depend on how much dead air the file was saved with.")
-    d.metric("Fake segments", ev["qualifying_segments"],
-             help=f"{ev['rejected_segments']} further segment(s) were flagged "
-                  "by Component 2 but fell below the confidence gate.")
+    segments = fusion.get("tampered_segments") or []
+
+    st.write("")
+    a, b, c = st.columns(3)
+    a.metric("Confidence", f"{fusion['confidence']*100:.1f}%")
+    b.metric("Duration", f"{result['input']['duration_s']:.2f} s")
+    if label == "Partially Tampered":
+        c.metric("Manipulated passages", len(segments))
+    else:
+        c.metric("Synthetic speech", f"{ev['tampered_ratio']*100:.1f}%")
 
     for message in fusion.get("warnings", []):
         st.warning(message)
 
     if not fusion["components_agree"]:
         st.warning(
-            "The two components disagreed. The verdict follows the rule shown "
-            "above; treat it as lower-confidence than the number suggests."
+            "The evidence for this verdict is mixed: the recording as a whole "
+            "and the individual passages within it point in different "
+            "directions. Treat the result as less certain than the confidence "
+            "figure suggests."
         )
 
-    segments = fusion.get("tampered_segments") or []
     if label == "Partially Tampered" and segments:
-        st.subheader("Fake segment time ranges")
-        st.code(format_ranges(segments), language=None)
-        st.dataframe(
-            [
-                {
-                    "Range (s)": format_range(s),
-                    "Start (s)": f"{s['start_s']:.2f}",
-                    "End (s)": f"{s['end_s']:.2f}",
-                    "Duration (s)": f"{s['duration_s']:.2f}",
-                    "Segment confidence": f"{s['confidence']*100:.1f}%",
-                }
-                for s in segments
-            ],
-            use_container_width=True, hide_index=True,
-        )
-        st.caption(
-            f"Total tampered: {ev['tampered_duration_s']:.2f} s of "
-            f"{result['input']['duration_s']:.2f} s "
-            f"({ev['tampered_ratio']*100:.1f}%)."
-        )
+        render_segments(segments, ev, result["input"]["duration_s"])
 
-    rejected = fusion.get("rejected_segments") or []
-    if rejected:
-        with st.expander(
-            f"{len(rejected)} region(s) flagged by Component 2 but not counted"
-        ):
-            st.caption(
-                "These cleared the duration floor but their mean spoof "
-                f"probability was below "
-                f"{fusion['params']['min_segment_confidence']:.2f}. On genuine "
-                "audio, breaths, silence and codec artefacts produce exactly "
-                "this: a run of weakly flagged frames. They are shown so the "
-                "evidence is not hidden, not because they indicate tampering."
-            )
-            st.dataframe(
-                [
-                    {
-                        "Range (s)": format_range(s),
-                        "Duration (s)": f"{s['duration_s']:.2f}",
-                        "Segment confidence": f"{s['confidence']*100:.1f}%",
-                    }
-                    for s in rejected
-                ],
-                use_container_width=True, hide_index=True,
-            )
-
-    scores = result.get("_frame_scores")
-    if scores is not None and len(scores):
-        st.subheader("Frame-level spoof probability")
-        hop = result["_frame_hop_s"]
-        p_spoof = 1.0 - np.asarray(scores, dtype=float)
-        times = np.asarray(result["_frame_times_s"], dtype=float)
-
-        # A 5-minute file is ~15,000 frames and a 40-minute one ~120,000;
-        # handing that many points to the browser stalls it. Downsample by
-        # taking the MAX of each bucket, not the mean, so a short spoof burst
-        # stays visible instead of being averaged away.
-        max_points = 2000
-        if len(p_spoof) > max_points:
-            bucket = int(np.ceil(len(p_spoof) / max_points))
-            pad = (-len(p_spoof)) % bucket
-            padded = np.concatenate([p_spoof, np.full(pad, np.nan)])
-            plotted = np.nanmax(padded.reshape(-1, bucket), axis=1)
-            plotted_t = times[::bucket][:len(plotted)]
-            step_s = hop * bucket
-        else:
-            plotted = p_spoof
-            plotted_t = times
-            step_s = hop
-
-        # x is real time in seconds, so a reported range like 2.23:2.90 can be
-        # read straight off this chart. Plotting against the frame index
-        # instead would make the two disagree on any file long enough to be
-        # chunked.
-        st.line_chart(
-            {"Time (s)": plotted_t.tolist(), "P(spoof)": plotted.tolist()},
-            x="Time (s)", y="P(spoof)",
-        )
-        gate = result.get("speech_gate", {})
-        excluded = 1.0 - float(gate.get("speech_ratio", 1.0))
-        st.caption(
-            f"{len(p_spoof):,} frames of {hop*1000:.0f} ms. "
-            f"One point on this chart = {step_s*1000:.0f} ms. "
-            f"Frames above {1 - c2['frame_threshold']:.2f} P(spoof) are counted "
-            "as spoof, before the minimum-duration and minimum-confidence "
-            "gates are applied. "
-            + (f"{excluded*100:.1f}% of the file was non-speech and is excluded "
-               "from the verdict entirely — high P(spoof) over those stretches "
-               "is out-of-domain output, not evidence of tampering."
-               if excluded > 0.001 else "")
-        )
-
-    with st.expander("Component detail"):
-        left, right = st.columns(2)
-        with left:
-            st.markdown("**Component 1 — Band-Augmented AASIST**")
-            st.write({k: v for k, v in c1.items() if k != "window_scores"})
-        with right:
-            st.markdown("**Component 2 — H1-Enhanced BAM**")
-            st.write({k: v for k, v in c2.items() if k != "segments"})
+    render_timeline(result)
 
     payload = {k: v for k, v in result.items() if not k.startswith("_")}
-    with st.expander("JSON output"):
-        st.json(payload)
     st.download_button(
-        "Download JSON",
+        "Download full report (JSON)",
         json.dumps(payload, indent=2),
         file_name=f"{Path(result['input']['filename']).stem}_result.json",
         mime="application/json",
+        help="The complete technical record of this analysis, for review.",
     )
+
+
+def render_segments(segments: list[dict], evidence: dict, duration_s: float):
+    st.subheader("Manipulated passages")
+    st.code(format_ranges(segments), language=None)
+    st.dataframe(
+        [
+            {
+                "Range (s)": format_range(s),
+                "Start (s)": f"{s['start_s']:.2f}",
+                "End (s)": f"{s['end_s']:.2f}",
+                "Duration (s)": f"{s['duration_s']:.2f}",
+                "Confidence": f"{s['confidence']*100:.1f}%",
+            }
+            for s in segments
+        ],
+        use_container_width=True, hide_index=True,
+    )
+    st.caption(
+        f"{evidence['tampered_duration_s']:.2f} s of synthetic speech in a "
+        f"{duration_s:.2f} s recording."
+    )
+
+
+def render_timeline(result: dict):
+    """Where in the recording the audio looks synthetic.
+
+    Kept because it is the one internal quantity a listener can actually check:
+    the peaks line up with passages they can play back, which is a different
+    thing from being handed a model's score and asked to trust it.
+    """
+    scores = result.get("_frame_scores")
+    if scores is None or not len(scores):
+        return
+
+    st.subheader("Where the recording looks synthetic")
+    p_synthetic = 1.0 - np.asarray(scores, dtype=float)
+    times = np.asarray(result["_frame_times_s"], dtype=float)
+
+    # A 5-minute file is ~15,000 points and a 40-minute one ~120,000; handing
+    # that many to the browser stalls it. Downsample by taking the MAX of each
+    # bucket, not the mean, so a short synthetic burst stays visible instead of
+    # being averaged away.
+    max_points = 2000
+    if len(p_synthetic) > max_points:
+        bucket = int(np.ceil(len(p_synthetic) / max_points))
+        pad = (-len(p_synthetic)) % bucket
+        padded = np.concatenate([p_synthetic, np.full(pad, np.nan)])
+        plotted = np.nanmax(padded.reshape(-1, bucket), axis=1)
+        plotted_t = times[::bucket][:len(plotted)]
+    else:
+        plotted = p_synthetic
+        plotted_t = times
+
+    # x is real time in seconds, so a reported range like 2.23:2.90 can be read
+    # straight off this chart. Plotting against the frame index instead would
+    # make the two disagree on any file long enough to be analysed in chunks.
+    st.line_chart(
+        {"Time (s)": plotted_t.tolist(),
+         "Likelihood of synthesis": plotted.tolist()},
+        x="Time (s)", y="Likelihood of synthesis",
+    )
+
+    excluded = 1.0 - float(result.get("speech_gate", {}).get("speech_ratio", 1.0))
+    caption = ("Higher means the audio at that moment resembles synthetic "
+               "speech. Peaks alone are not a verdict — a passage is only "
+               "reported above once it is sustained and strong enough.")
+    if excluded > 0.001:
+        caption += (f" {excluded*100:.0f}% of this file is silence or "
+                    "non-speech and was excluded from the verdict; readings "
+                    "over those stretches are not meaningful.")
+    st.caption(caption)
 
 
 if __name__ == "__main__":

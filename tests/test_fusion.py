@@ -111,6 +111,18 @@ def test_marginal_c1_fake_score_alone_does_not_condemn_a_file():
     assert r["c1_confidence_band"] == "Low/Medium"
 
 
+def test_integration_uses_c1_score_when_boolean_flag_is_stale():
+    """The score/threshold pair is authoritative at the fusion boundary."""
+    c1_output = c1(0.02)
+    c1_output["is_fake"] = False
+    c1_output["verdict"] = "REAL"
+
+    r = fuse(c1_output, c2([]))
+
+    assert r["final_prediction"] == FULLY_FAKE
+    assert r["rule_fired"] == "R3"
+
+
 def test_weakly_flagged_region_in_real_audio_is_not_tampering():
     """Breaths and codec artefacts drift past the frame threshold at ~0.5
     P(spoof); a real splice sits at 0.9+. Only the latter counts."""
